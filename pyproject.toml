@@ -1,0 +1,4 @@
+# Deployment ke liye sirf Vercel ko entrypoint batana hai - dependencies
+# requirements.txt me hain (Vercel dono ko support karta hai).
+[tool.vercel]
+entrypoint = "api/index:app"

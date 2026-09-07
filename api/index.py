@@ -1,43 +1,23 @@
-"""Vercel serverless entry (ASGI).
+"""Vercel entrypoint (FastAPI).
 
-Vercel's Python runtime natively serves ASGI apps, so `app` is all it needs.
-`vercel.json` rewrites every path here ("/(.*)" -> "/api/index"), and Vercel
-hands the ASGI app the ORIGINAL request path - isliye FastAPI ke apne routes
-(/api/upload, /api/detect, ...) waise hi kaam karte hain.
+Vercel ka FastAPI preset `api/index.py` ko entrypoint maanta hai: top-level me
+`app` (ek FastAPI instance) milte hi SAARE requests isi app par aa jaate hain -
+koi `builds`/`rewrites` ki jarurat nahi (aur `functions` ke saath `builds`
+rakha to build fail ho jaata hai).
 
-Agar kabhi path "/api/index" ke roop me aa jaaye (kuch proxy setups), to neeche
-ka wrapper use "/" se replace kar deta hai taaki kam se kam UI to load ho.
+Serverless = light mode: ffmpeg nahi, /tmp writable, images yahin ban jaati
+hain, videos `WM_WORKER_URL` wali service par jaate hain.
 """
 import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-# serverless par ffmpeg/opencv heavy pipeline nahi chalani - video worker par
+# Vercel par hamesha light mode (ffmpeg/OpenCV-heavy video pipeline nahi chalani)
 os.environ.setdefault("WM_LIGHT", "1")
-os.environ.setdefault("WM_STORAGE", os.environ.get("WM_STORAGE", "local"))
+os.environ.setdefault("WM_STORAGE", "local")
 
-from server.app import app as _fastapi_app  # noqa: E402
-
-
-class _PathFix:
-    """Defensive: /api/index -> / (UI) if a proxy rewrites the path literally."""
-
-    def __init__(self, inner):
-        self.inner = inner
-
-    async def __call__(self, scope, receive, send):
-        if scope.get("type") == "http":
-            path = scope.get("path", "")
-            if path == "/api/index" or path.startswith("/api/index/"):
-                scope = dict(scope)
-                rest = path.split("/api/index", 1)[1]
-                scope["path"] = rest or "/"
-                scope["raw_path"] = scope["path"].encode()
-        await self.inner(scope, receive, send)
-
-
-app = _PathFix(_fastapi_app)
-handler = app          # WSGI/ASGI fallback name some runtimes look for
+from server.app import app  # noqa: E402  <- FastAPI instance (Vercel isi ko dhoondhta hai)

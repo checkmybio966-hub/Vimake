@@ -1,7 +1,7 @@
 # Full worker image: OpenCV + ffmpeg, videos bhi yahin process hote hain.
 # Railway / Render / Fly / apne GPU box par chalao, aur Vercel se
 # WM_WORKER_URL=<ye service> set kar do.
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY server/requirements.txt ./requirements.txt
+COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server ./server

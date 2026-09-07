@@ -15,3 +15,6 @@ runtime/
 
 # generated sample media (python tools/make_sample.py se ban jaate hain)
 samples/
+
+# runtime data (worker / local)
+runtime-worker/

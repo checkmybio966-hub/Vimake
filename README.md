@@ -18,7 +18,7 @@ se theek karo → remove. Vmake.ai jaisa experience, poori tarah open code.
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install -r server/requirements.txt
+pip install -r requirements.txt          # video ke liye: -r requirements-local.txt
 
 python tools/make_sample.py            # test media (watermarked + clean + GT mask)
 python -m uvicorn server.app:app --host 0.0.0.0 --port 8000
@@ -37,14 +37,19 @@ Browser ──► Vercel  (static UI + FastAPI serverless, images yahin bante ha
 ```
 
 1. https://vercel.com/new → import `checkmybio966-hub/Vimake` (branch
-   `arena/01a07c00-vimake`) → Deploy. `vercel.json` sab set karta hai.
+   `arena/01a07c00-vimake`) → **Deploy**. Vercel `requirements.txt` me fastapi
+   dekh kar FastAPI preset lagata hai aur `api/index.py` ka `app` entrypoint
+   pakad leta hai — koi build command nahi chahiye.
 2. Worker (video ke liye): `railway up` / Render / Fly / `docker compose up`
    — **wahi repo, bas full mode.**
 3. Vercel env: `WM_LIGHT=1`, `WM_WORKER_URL=https://<worker>`, `WORKER_TOKEN=…`
    (poori table + troubleshooting [`DEPLOY.md`](DEPLOY.md) me).
 
 Vercel par video isliye forward karte hain: serverless timeout (60 s),
-4.5 MB body limit, 250 MB bundle limit. Images bilkul theek chalti hain (~1-5 s).
+4.5 MB body limit, aur ffmpeg ka na hona. Images wahin ban jaati hain (~1-5 s)
+aur result **seedha data-url** me milta hai — serverless ka `/tmp` har instance
+ka apna hota hai, isliye UI file har request me dubhara bhejta hai
+(`GET /api/config` use bata deta hai ki wo serverless hai).
 
 ## 3. Vmake.ai andar kya karta hai (aur yahan kya hai)
 
@@ -103,9 +108,11 @@ hosted API lagao to image me 50+ dB aur video me +5..10 dB aam hai.
 ## 6. Repo map
 
 ```
-api/index.py              Vercel serverless entry (ASGI + path fix)
-vercel.json               builds + catch-all rewrite + maxDuration
-Dockerfile / docker-compose.yml / requirements-vercel.txt
+api/index.py              Vercel entrypoint (FastAPI app = `app`)
+vercel.json               functions config + excludeFiles + maxDuration
+requirements.txt          Vercel + Docker + local (light set)
+requirements-local.txt    +imageio-ffmpeg (local video pipeline)
+Dockerfile / docker-compose.yml
 DEPLOY.md                 Vercel + worker step-by-step
 
 server/app.py             FastAPI: upload / detect / process / jobs /
@@ -132,6 +139,8 @@ docs/                     01 vmake analysis · 02 algorithms · 03 api · 04 bac
 ## 7. Apne app me lagana
 
 ```bash
+# 0) server kis mode me hai (serverless? worker? s3?)
+curl $HOST/api/config
 # 1) upload
 curl -F "file=@photo.jpg"  $HOST/api/upload            # → asset_id
 # 2) detect (text bhi: remove_text=1 default)
@@ -140,6 +149,14 @@ curl -F "asset_id=$AID" -F "remove_text=1" $HOST/api/detect
 curl -F "asset_id=$AID" -F "mode=auto" $HOST/api/process   # → job_id
 # 4) poll
 curl $HOST/api/jobs/$JOB
+```
+
+Serverless (Vercel) par `asset_id` ki jagah `file` dubhara bhej do — har request
+alag instance par ja sakti hai:
+
+```bash
+curl -F "file=@photo.jpg" -F "remove_text=1" $HOST/api/detect    # mask_data (data-url)
+curl -F "file=@photo.jpg" -F "remove_text=1" $HOST/api/process   # result_data (data-url)
 ```
 
 Ya library ki tarah:

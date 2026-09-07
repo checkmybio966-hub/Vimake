@@ -1,0 +1,13 @@
+# Vercel + Docker + local - sab ke liye yahi file hai.
+# Python 3.12 (Vercel default) ke wheels; requirements-local.txt me video ke
+# liye imageio-ffmpeg extra hai (local/Docker me ffmpeg zaroori hota hai).
+fastapi==0.115.*
+uvicorn==0.30.*
+python-multipart==0.0.*
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+pillow==10.3.0
+
+# optional: S3/R2 storage + Upstash Redis (serverless ke liye)
+boto3==1.35.*
+redis==5.0.*

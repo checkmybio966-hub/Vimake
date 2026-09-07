@@ -16,11 +16,29 @@ Environment overrides (all optional):
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB_DIR = ROOT / "web"
+
+
+def _is_serverless() -> bool:
+    """Vercel / Lambda: repo read-only hota hai, sirf /tmp writable hai."""
+    if os.environ.get("WM_LIGHT", "0") in ("1", "true", "yes"):
+        return True
+    return any(os.environ.get(k) for k in ("VERCEL", "AWS_LAMBDA_FUNCTION_NAME",
+                                           "LAMBDA_TASK_ROOT"))
+
+
+def _default_workdir() -> Path:
+    env = os.environ.get("WM_WORKDIR")
+    if env:
+        return Path(env)
+    if _is_serverless():
+        return Path(tempfile.gettempdir()) / "wm-runtime"
+    return ROOT / "runtime"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -40,7 +58,7 @@ def _env_float(name: str, default: float) -> float:
 @dataclass
 class Config:
     # ---- storage -------------------------------------------------------
-    workdir: Path = field(default_factory=lambda: Path(os.environ.get("WM_WORKDIR", ROOT / "runtime")))
+    workdir: Path = field(default_factory=_default_workdir)
     upload_dir: Path = field(init=False)
     result_dir: Path = field(init=False)
 
@@ -92,7 +110,16 @@ class Config:
         self.upload_dir = self.workdir / "uploads"
         self.result_dir = self.workdir / "results"
         for d in (self.upload_dir, self.result_dir):
-            d.mkdir(parents=True, exist_ok=True)
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:               # read-only FS (serverless)
+                print(f"[config] cannot create {d} ({exc}) -> using temp dir")
+                self.workdir = Path(tempfile.mkdtemp(prefix="wm-"))
+                self.upload_dir = self.workdir / "uploads"
+                self.result_dir = self.workdir / "results"
+                self.upload_dir.mkdir(parents=True, exist_ok=True)
+                self.result_dir.mkdir(parents=True, exist_ok=True)
+                break
         if self.light:                 # serverless: sirf videos worker par
             self.max_frames = min(self.max_frames, 1)
 

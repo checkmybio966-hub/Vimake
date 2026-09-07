@@ -4,16 +4,33 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
-const state = { items: [], editing: null, removeText: true };
+const state = {
+  items: [], editing: null, removeText: true,
+  // server taligate karta hai ki wo serverless hai ya nahi; serverless par
+  // file har request me dubhara jaati hai aur result seedha data-url me aata hai
+  server: { light: false, serverless: false, worker: false, worker_base: '',
+            storage: 'local', max_upload_mb: 500 },
+};
 const API = {
   upload: '/api/upload', detect: '/api/detect', process: '/api/process',
-  job: id => `/api/jobs/${id}`, backends: '/api/backends',
+  job: id => `/api/jobs/${id}`, backends: '/api/backends', config: '/api/config',
+  presign: '/api/storage/presign',
 };
 
 /* ------------------------------------------------------------------ boot */
 fetch(API.backends).then(r => r.json()).then(b => {
   $('#backend').textContent = `backend: ${b.active} (${b.available.filter(x => x.ready !== false).map(x => x.name).join(', ')})`;
 }).catch(() => { $('#backend').textContent = 'backend: offline'; });
+
+fetch(API.config).then(r => r.json()).then(c => {
+  state.server = Object.assign(state.server, c);
+  const extra = [
+    state.server.serverless ? 'serverless' : '',
+    state.server.worker ? 'video-worker ✓' : (state.server.serverless ? 'video off (no worker)' : ''),
+    state.server.storage === 's3' ? 's3 storage' : '',
+  ].filter(Boolean).join(' · ');
+  if (extra) $('#backend').textContent += ' · ' + extra;
+}).catch(() => {});
 
 const dz = $('#dropzone');
 dz.addEventListener('click', () => $('#fileInput').click());
@@ -47,6 +64,10 @@ async function addFiles(files) {
       if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
       item.info = await r.json();
       item.kind = item.info.kind;
+      // serverless: /media wali file agle instance par nahi milegi isliye
+      // preview hamesha data-url ya local object-url se dikhao
+      item.preview = item.info.poster_data || item.info.poster
+        || (f.type.startsWith('image/') ? URL.createObjectURL(f) : '');
       render();
       autoDetect(item);
     } catch (err) {
@@ -56,17 +77,40 @@ async function addFiles(files) {
 }
 
 async function autoDetect(item) {
+  if (!item.info) return;
+  // serverless par video detect nahi ho sakta (ffmpeg nahi) - worker karega
+  if (item.kind === 'video' && state.server.serverless) {
+    item.det = { found: false, notes: 'detection runs on the video worker' };
+    render(); return;
+  }
   item.detecting = true; render();
   try {
     const body = new FormData();
-    body.append('asset_id', item.info.asset_id);
+    if (state.server.serverless) body.append('file', item.file);
+    else body.append('asset_id', item.info.asset_id);
     body.append('remove_text', state.removeText ? '1' : '0');
     const r = await fetch(API.detect, { method: 'POST', body });
     const d = await r.json();
     item.det = d;
-    if (d.found) { item.maskUrl = d.mask_url; item.overlayUrl = d.overlay_url; }
+    if (d.found) {
+      item.maskUrl = d.mask_data || d.mask_url;
+      item.overlayUrl = d.overlay_data || d.overlay_url;
+    }
   } catch (e) { item.det = { found: false, notes: 'detect failed: ' + e.message }; }
   item.detecting = false; render();
+}
+
+/* badi file seedhi S3/R2 par (Vercel ka 4.5 MB body limit cross na ho) */
+async function uploadToStorage(file) {
+  const r = await fetch(API.presign + '?filename=' + encodeURIComponent(file.name));
+  const p = await r.json();
+  if (p.mode !== 's3' || !p.url) throw new Error('remote storage not configured');
+  await fetch(p.url, {
+    method: 'PUT',
+    headers: { 'Content-Type': p.content_type || 'application/octet-stream' },
+    body: file,
+  });
+  return p.final_url;
 }
 
 /* --------------------------------------------------------------- render */
@@ -84,24 +128,28 @@ function card(it) {
   let media = `<div class="media"><span class="badge">${badge}</span>`;
   if (it.stage === 'done' && it.resultUrl) {
     if (it.kind === 'video') {
+      // serverless par source file wapas nahi milti -> sirf clean video dikhao
+      const orig = state.server.serverless ? (it.preview || '') : (it.info.source || it.preview || '');
       media += `<div class="compare" style="position:absolute;inset:0">
-          <video src="${it.info.source}" muted loop autoplay playsinline></video>
+          ${orig ? `<video src="${orig}" muted loop autoplay playsinline></video>` : ''}
           <video class="after" src="${it.resultUrl}" muted loop autoplay playsinline></video>
           <input type="range" min="0" max="100" value="50" />
-          <span class="tag l">original</span><span class="tag r">clean</span>
+          ${orig ? '<span class="tag l">original</span>' : ''}<span class="tag r">clean</span>
         </div>`;
     } else {
       media += `<div class="compare" style="position:absolute;inset:0">
-          <img src="${it.info.poster}" />
+          <img src="${it.preview || it.info.poster || ''}" />
           <img class="after" src="${it.resultUrl}" />
           <input type="range" min="0" max="100" value="50" />
           <span class="tag l">original</span><span class="tag r">clean</span>
         </div>`;
     }
   } else if (it.overlayUrl) {
-    media += `<img class="masklayer" src="${it.overlayUrl}" /><img src="${it.info?.poster || it.info?.source || ''}" />`;
-  } else if (it.info?.poster) {
-    media += `<img src="${it.info.poster}" />`;
+    media += `<img class="masklayer" src="${it.overlayUrl}" /><img src="${it.preview || it.info?.poster || it.info?.source || ''}" />`;
+  } else if (it.preview || it.info?.poster) {
+    media += `<img src="${it.preview || it.info.poster}" />`;
+  } else if (it.info && !it.error) {
+    media += `<div class="muted">${it.kind === 'video' ? 'video ready' : 'no preview'}</div>`;
   } else if (it.error) {
     media += `<div class="muted">${it.error}</div>`;
   } else {
@@ -167,7 +215,21 @@ function meta(i) {
 async function runJob(it) {
   if (!it.info || it.job) return;
   const fd = new FormData();
-  fd.append('asset_id', it.info.asset_id);
+  try {
+    if (state.server.serverless) {
+      // serverless ka /tmp instance-local hai -> file dubhara bhejni padti hai
+      const big = it.file.size > 4.2 * 1024 * 1024;
+      if (big && state.server.storage === 's3') {
+        fd.append('source_url', await uploadToStorage(it.file));
+      } else if (big) {
+        throw new Error('file > 4.5 MB: Vercel par S3/R2 storage set karein (DEPLOY.md)');
+      } else {
+        fd.append('file', it.file);
+      }
+    } else {
+      fd.append('asset_id', it.info.asset_id);
+    }
+  } catch (e) { it.error = e.message; it.job = null; render(); return; }
   fd.append('mode', it.mode || 'auto');
   if (it.mask) fd.append('mask', it.mask);
   fd.append('remove_text', (it.mask ? false : state.removeText) ? '1' : '0');
@@ -175,17 +237,31 @@ async function runJob(it) {
   try {
     const r = await fetch(API.process, { method: 'POST', body: fd });
     const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || r.statusText);
-    it.job = d.job_id; poll(it);
+    if (!r.ok && !d.job_id) throw new Error(d.detail || d.message || r.statusText);
+    it.job = d.job_id;
+    if (d.status === 'done' && d.result_data) {      // serverless: result yahin
+      it.stage = 'done'; it.resultUrl = d.result_data; it.resultName = d.result_name;
+      if (d.detection) it.det = d.detection;
+      render(); return;
+    }
+    if (d.status === 'error') { it.error = d.message || 'processing failed'; it.job = null; render(); return; }
+    if (d.remote && d.worker_base) { it.remoteId = d.remote; it.workerBase = d.worker_base; }
+    poll(it);
   } catch (e) { it.error = e.message; it.job = null; render(); }
 }
 
 async function poll(it) {
+  // video worker par gaya hai to usi service se status lo (Vercel par
+  // job-state bhi instance-local hota hai, Redis ke bina wahan nahi milta)
+  const url = (it.remoteId && it.workerBase)
+    ? `${it.workerBase}/api/jobs/${it.remoteId}` : API.job(it.job);
   for (let i = 0; i < 3000; i++) {
-    const r = await fetch(API.job(it.job)); const s = await r.json();
+    const r = await fetch(url); const s = await r.json();
     it.progress = s.progress || 0; it.stageText = s.stage || s.status;
     if (s.status === 'done') {
-      it.stage = 'done'; it.resultUrl = s.result_url; it.resultName = s.result_name;
+      let url = s.result_url || '';
+      if (url.startsWith('/') && it.workerBase) url = it.workerBase + url;  // worker file
+      it.stage = 'done'; it.resultUrl = url; it.resultName = s.result_name;
       it.det = s.detection || it.det; render(); return;
     }
     if (s.status === 'error') { it.error = s.message; it.job = null; render(); return; }

@@ -1,0 +1,4 @@
+# Apne laptop / VPS par video pipeline chalani ho to ye extra chahiye
+# (Vercel par mat lagana - wahan worker service ffmpeg leta hai).
+-r requirements.txt
+imageio-ffmpeg==0.4.9

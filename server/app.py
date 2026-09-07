@@ -12,6 +12,9 @@ Run:
 """
 from __future__ import annotations
 
+import base64
+import mimetypes
+import os
 import shutil
 import traceback
 import uuid
@@ -32,6 +35,9 @@ from server.core import worker as worker_mod
 from server.core.maskops import from_png_bytes, overlay_preview, to_png_bytes
 
 cfg = cfgmod.cfg
+# Vercel/Lambda: repo read-only, /tmp writable, koi ffmpeg nahi
+_serverless = bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+                   or os.environ.get("LAMBDA_TASK_ROOT") or cfg.light)
 app = FastAPI(title="Watermark Remover", version="1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                    allow_headers=["*"])
@@ -47,6 +53,80 @@ def asset_dir(asset_id: str) -> Path:
     d = cfg.upload_dir / asset_id
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".webp": "image/webp", ".bmp": "image/bmp", ".mp4": "video/mp4"}
+
+
+def jpg_data_url(img, max_side: int = 1280, quality: int = 88) -> str:
+    """ndarray -> downscaled `data:image/jpeg;base64,...` preview."""
+    h, w = img.shape[:2]
+    s = min(1.0, max_side / max(h, w))
+    if s < 1.0:
+        img = cv2.resize(img, (max(1, int(w * s)), max(1, int(h * s))),
+                         interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not ok:
+        return ""
+    return "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode()
+
+
+def inline_result(dst: Path, name: str, max_bytes: int = 2_500_000) -> tuple[str, str]:
+    """Result file -> (data-url, filename); bade PNG ko JPEG bana dete hain."""
+    try:
+        if dst.stat().st_size <= max_bytes:
+            return b64_file(dst), name
+    except OSError:
+        return "", name
+    img = cv2.imread(str(dst), cv2.IMREAD_COLOR)
+    if img is not None:
+        ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        if ok:
+            return ("data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode(),
+                    Path(name).stem + ".jpg")
+    return b64_file(dst), name
+
+
+def b64_file(path: Path) -> str:
+    """File -> data: url (serverless par /media cross-instance kaam nahi karta)."""
+    mime = MIME.get(Path(path).suffix.lower(), "application/octet-stream")
+    return f"data:{mime};base64," + base64.b64encode(Path(path).read_bytes()).decode()
+
+
+async def _store_upload_file(upload) -> Path:
+    d = cfg.upload_dir / ("f" + uuid.uuid4().hex[:12])
+    d.mkdir(parents=True, exist_ok=True)
+    ext = Path(upload.filename or "upload.bin").suffix.lower()
+    p = d / f"source{ext}"
+    with p.open("wb") as f:
+        shutil.copyfileobj(upload.file, f)
+    return p
+
+
+async def resolve_source(upload=None, asset_id: str = "", source_url: str = ""):
+    """Source file for a request.
+
+    serverless (Vercel) par har request alag instance par ja sakti hai, isliye
+    client file (ya S3 url) dubhara bhejta hai - `asset_id` sirf local/Docker
+    (ya Redis+shared storage) ke liye hai.
+    """
+    if upload is not None and getattr(upload, "filename", ""):
+        return await _store_upload_file(upload)
+    if source_url:
+        d = cfg.upload_dir / ("u" + uuid.uuid4().hex[:12])
+        d.mkdir(parents=True, exist_ok=True)
+        ext = Path(source_url.split("?")[0]).suffix.lower() or ".bin"
+        p = d / f"source{ext}"
+        storage_mod.download(source_url, str(p))
+        return p
+    if asset_id:
+        d = asset_dir(asset_id)
+        src = next((q for q in d.iterdir() if q.name.startswith("source")), None)
+        if src is None:
+            raise HTTPException(404, "asset not found")
+        return src
+    raise HTTPException(400, "file, asset_id or source_url required")
 
 
 def b64_to_mask(data_url: str) -> np.ndarray | None:
@@ -74,6 +154,27 @@ def backends():
     return describe_backends()
 
 
+@app.get("/api/config")
+def api_config():
+    """Front-end ko batata hai ki ye serverless hai ya nahi.
+
+    serverless=true  -> browser file har request me dubhara bhejega aur result
+                        seedha data-url me aayega (kyunki /tmp instance-local hai)
+    worker=true      -> video is long-running service par jaate hain
+    storage=s3       -> badi files seedhi S3/R2 par (4.5 MB Vercel limit se bachne ko)
+    """
+    return {
+        "light": bool(cfg.light),
+        "serverless": bool(cfg.light or _serverless),
+        "worker": bool(worker_mod.enabled()),
+        "worker_base": cfg.worker_url.rstrip("/") if cfg.worker_url else "",
+        "storage": storage_mod.get_storage().mode,
+        "max_upload_mb": cfg.max_upload_mb,
+        "redis": bool(cfg.redis_url),
+        "max_side": cfg.max_side,
+    }
+
+
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...)):
     ext = Path(file.filename or "upload.bin").suffix.lower()
@@ -91,29 +192,36 @@ async def upload(file: UploadFile = File(...)):
                   "source": f"/media/uploads/{asset_id}/source{ext}"}
 
     if kind == "video":
-        vi = media.probe(str(src))
-        info.update(width=vi.width, height=vi.height, fps=round(vi.fps, 3),
-                    duration=round(vi.duration, 2), has_audio=vi.has_audio,
-                    codec=vi.vcodec)
-        poster = media.first_frame(str(src), max_side=min(1280, cfg.max_side))
-        if poster is not None:
-            cv2.imwrite(str(d / "poster.jpg"), poster, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
-            info["poster"] = f"/media/uploads/{asset_id}/poster.jpg"
+        # serverless me ffmpeg nahi hota - probe fail ho to bhi upload accept karo
+        try:
+            vi = media.probe(str(src))
+            info.update(width=vi.width, height=vi.height, fps=round(vi.fps, 3),
+                        duration=round(vi.duration, 2), has_audio=vi.has_audio,
+                        codec=vi.vcodec)
+        except Exception as exc:                               # noqa: BLE001
+            info.update(width=0, height=0, fps=0, duration=0, probe_error=str(exc))
+        if not _serverless:
+            poster = media.first_frame(str(src), max_side=min(1280, cfg.max_side))
+            if poster is not None:
+                cv2.imwrite(str(d / "poster.jpg"), poster,
+                            [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                info["poster"] = f"/media/uploads/{asset_id}/poster.jpg"
+                info["poster_data"] = b64_file(d / "poster.jpg")
     else:
         img = cv2.imread(str(src), cv2.IMREAD_COLOR)
         if img is None:
             raise HTTPException(400, "cannot decode image")
         info.update(width=img.shape[1], height=img.shape[0])
         info["poster"] = info["source"]
+        info["poster_data"] = jpg_data_url(img, max_side=1280, quality=88)
     return info
 
 
 @app.post("/api/detect")
-def detect(asset_id: str = Form(...), remove_text: str = Form("1")):
-    d = asset_dir(asset_id)
-    src = next((p for p in d.iterdir() if p.name.startswith("source")), None)
-    if src is None:
-        raise HTTPException(404, "asset not found")
+async def detect(file: UploadFile = File(None), asset_id: str = Form(""),
+                 source_url: str = Form(""), remove_text: str = Form("1")):
+    src = await resolve_source(file, asset_id, source_url)
+    d = src.parent
     ext = src.suffix.lower()
     want_text = remove_text not in ("0", "false", "no", "")
     try:
@@ -152,8 +260,12 @@ def detect(asset_id: str = Form(...), remove_text: str = Form("1")):
         cv2.imwrite(str(d / "mask.png"), det.mask)
         cv2.imwrite(str(d / "overlay.jpg"), overlay_preview(frame, det.mask),
                     [int(cv2.IMWRITE_JPEG_QUALITY), 92])
-        out["mask_url"] = f"/media/uploads/{asset_id}/mask.png"
-        out["overlay_url"] = f"/media/uploads/{asset_id}/overlay.jpg"
+        out["mask_url"] = f"/media/uploads/{d.name}/mask.png"
+        out["overlay_url"] = f"/media/uploads/{d.name}/overlay.jpg"
+        # serverless: /media agle instance par nahi milega -> bytes hi bhej do
+        if _serverless:
+            out["mask_data"] = b64_file(d / "mask.png")
+            out["overlay_data"] = b64_file(d / "overlay.jpg")
     return out
 
 
@@ -162,10 +274,12 @@ def presign(filename: str = ""):
     """Direct-to-storage upload URL (production). Local mode → {"mode":"local"}."""
     st = storage_mod.get_storage()
     key = f"u/{uuid.uuid4().hex[:12]}/{Path(filename or 'file').name}"
-    url = st.presign_put(key)
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    url = st.presign_put(key, content_type=content_type)
     if not url:
-        return {"mode": "local", "key": None, "url": None}
-    return {"mode": st.mode, "key": key, "url": url, "final_url": st.url(key)}
+        return {"mode": "local", "key": None, "url": None, "content_type": content_type}
+    return {"mode": st.mode, "key": key, "url": url, "final_url": st.url(key),
+            "content_type": content_type}
 
 
 def _save_upload(data: bytes, name: str) -> str:
@@ -254,25 +368,6 @@ async def remote_process(request: Request):
                             "Images work without it.")
         return {"job_id": job.id}
 
-    # serverless (Vercel) mode: video / heavy work goes to the long-running worker
-    if worker_mod.enabled() and (ext in VIDEO_EXT or cfg.light):
-        try:
-            mask_path = None
-            if user_mask is not None:
-                mask_path = str(asset_dir(asset_id) / "user_mask.png")
-                Path(mask_path).write_bytes(to_png_bytes(user_mask))
-            rid = worker_mod.submit_file(str(src), "video" if ext in VIDEO_EXT else "image",
-                                         mode=mode, remove_text=want_text, backend=backend,
-                                         mask_path=mask_path)
-            if rid:
-                jobs.update(job.id, status="running", stage="queued on worker",
-                            message=rid, progress=0.02)
-                return {"job_id": job.id, "remote": rid}
-        except Exception as exc:                                  # noqa: BLE001
-            traceback.print_exc()
-            jobs.update(job.id, status="error", message=f"worker submit failed: {exc}")
-            return {"job_id": job.id}
-
     jobs.run(job.id, work)
     return {"job_id": job.id}
 
@@ -288,18 +383,23 @@ def remote_job(job_id: str, request: Request):
 
 
 @app.post("/api/process")
-def process(asset_id: str = Form(...), mask: str = Form(""), mode: str = Form("auto"),
-            backend: str = Form("auto"), remove_text: str = Form("1")):
-    d = asset_dir(asset_id)
-    src = next((p for p in d.iterdir() if p.name.startswith("source")), None)
-    if src is None:
-        raise HTTPException(404, "asset not found")
+async def process(file: UploadFile = File(None), asset_id: str = Form(""),
+                  source_url: str = Form(""), mask: str = Form(""),
+                  mode: str = Form("auto"), backend: str = Form("auto"),
+                  remove_text: str = Form("1")):
+    """Remove the watermark.
+
+    Local/Docker: `asset_id` (upload ke baad) kaafi hai.
+    Serverless (Vercel): browser `file` (ya S3 `source_url`) dubhara bhejta hai,
+    kyunki /tmp har instance ka apna hota hai.
+    """
+    src = await resolve_source(file, asset_id, source_url)
     ext = src.suffix.lower()
     user_mask = b64_to_mask(mask)
     want_text = remove_text not in ("0", "false", "no", "") and user_mask is None
 
     job = jobs.create()
-    out_dir = cfg.result_dir / asset_id
+    out_dir = cfg.result_dir / (src.parent.name or job.id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if ext in VIDEO_EXT:
@@ -311,7 +411,7 @@ def process(asset_id: str = Form(...), mask: str = Form(""), mode: str = Form("a
                                          remove_text=want_text, progress=progress)
             jobs.update(job.id, detection=det.to_json())
 
-        result_url = f"/media/results/{asset_id}/clean_{job.id}.mp4"
+        result_url = f"/media/results/{out_dir.name}/{dst.name}"
         result_name = f"{src.stem}_clean.mp4"
     else:
         dst = out_dir / f"clean_{job.id}{'.png' if ext in ('.png', '.webp') else '.jpg'}"
@@ -322,37 +422,70 @@ def process(asset_id: str = Form(...), mask: str = Form(""), mode: str = Form("a
                                          progress=progress)
             jobs.update(job.id, detection=det.to_json())
 
-        result_url = f"/media/results/{asset_id}/{dst.name}"
+        result_url = f"/media/results/{out_dir.name}/{dst.name}"
         result_name = f"{src.stem}_clean{dst.suffix}"
 
     jobs.update(job.id, result_url=result_url, result_name=result_name)
 
-    # serverless (Vercel) me ffmpeg nahi hota - video ke liye worker zaroori hai
-    if cfg.light and not worker_mod.enabled() and ext in VIDEO_EXT:
-        jobs.update(job.id, status="error",
-                    message="Video needs a worker on serverless: set WM_WORKER_URL "
-                            "to the Docker/Railway/Render service (see DEPLOY.md). "
-                            "Images work without it.")
+    # ------------------------------------------------------------------ video
+    if ext in VIDEO_EXT:
+        if worker_mod.enabled():
+            try:
+                rid = None
+                if source_url and file is None:
+                    rid = worker_mod.submit(source_url, "video", mode=mode,
+                                            remove_text=want_text, backend=backend)
+                else:
+                    mask_path = None
+                    if user_mask is not None:
+                        mask_path = str(src.parent / "user_mask.png")
+                        Path(mask_path).write_bytes(to_png_bytes(user_mask))
+                    rid = worker_mod.submit_file(str(src), "video", mode=mode,
+                                                 remove_text=want_text, backend=backend,
+                                                 mask_path=mask_path)
+                if rid:
+                    jobs.update(job.id, status="running", stage="queued on worker",
+                                message=rid, progress=0.02)
+                    return {"job_id": job.id, "remote": rid, "status": "running",
+                            "worker_base": cfg.worker_url.rstrip("/")}
+            except Exception as exc:                              # noqa: BLE001
+                traceback.print_exc()
+                jobs.update(job.id, status="error",
+                            message=f"worker submit failed: {exc}")
+                return {"job_id": job.id, "status": "error",
+                        "message": f"worker submit failed: {exc}"}
+        if cfg.light or _serverless:
+            msg = ("Video needs a worker on serverless: set WM_WORKER_URL to the "
+                   "Docker/Railway/Render service (see DEPLOY.md). Images work "
+                   "without it.")
+            jobs.update(job.id, status="error", message=msg)
+            return {"job_id": job.id, "status": "error", "message": msg}
+        jobs.run(job.id, work)
         return {"job_id": job.id}
 
-    # serverless (Vercel) mode: video / heavy work goes to the long-running worker
-    if worker_mod.enabled() and (ext in VIDEO_EXT or cfg.light):
+    # ------------------------------------------------------------------ image
+    if _serverless:
+        # ek hi request me khatam kar do: polling ka /tmp par koi matlab nahi
         try:
-            mask_path = None
-            if user_mask is not None:
-                mask_path = str(asset_dir(asset_id) / "user_mask.png")
-                Path(mask_path).write_bytes(to_png_bytes(user_mask))
-            rid = worker_mod.submit_file(str(src), "video" if ext in VIDEO_EXT else "image",
-                                         mode=mode, remove_text=want_text, backend=backend,
-                                         mask_path=mask_path)
-            if rid:
-                jobs.update(job.id, status="running", stage="queued on worker",
-                            message=rid, progress=0.02)
-                return {"job_id": job.id, "remote": rid}
+            work(lambda v, stage: None)
+            jobs.update(job.id, status="done", progress=1.0, stage="done",
+                        message="done")
+            st = jobs.get(job.id)
+            data_url, fname = (inline_result(dst, result_name) if dst.exists()
+                               else ("", result_name))
+            if not data_url:
+                msg = "result file missing (processing produced no output)"
+                jobs.update(job.id, status="error", message=msg)
+                return {"job_id": job.id, "status": "error", "message": msg}
+            return {"job_id": job.id, "status": "done", "result_name": fname,
+                    "result_data": data_url,
+                    "result_url": result_url,
+                    "detection": (st.detection if st else None)}
         except Exception as exc:                                  # noqa: BLE001
             traceback.print_exc()
-            jobs.update(job.id, status="error", message=f"worker submit failed: {exc}")
-            return {"job_id": job.id}
+            msg = f"{type(exc).__name__}: {exc}"
+            jobs.update(job.id, status="error", message=msg)
+            return {"job_id": job.id, "status": "error", "message": msg}
 
     jobs.run(job.id, work)
     return {"job_id": job.id}
@@ -396,10 +529,14 @@ async def _unhandled(request, exc):                            # noqa: ANN001
 # --------------------------------------------------------------------------- #
 #  static
 # --------------------------------------------------------------------------- #
-app.mount("/media/uploads", StaticFiles(directory=str(cfg.upload_dir)), name="uploads")
-try:
-    app.mount("/media/blobs", StaticFiles(directory=str(cfg.workdir / "blobs")), name="blobs")
-except Exception:                                                 # noqa: BLE001
-    pass
-app.mount("/media/results", StaticFiles(directory=str(cfg.result_dir)), name="results")
+if not _serverless:
+    # serverless par /media ka koi matlab nahi (har instance ka apna /tmp) -
+    # wahan results seedhe data-url ke roop me browser ko mil jaate hain.
+    app.mount("/media/uploads", StaticFiles(directory=str(cfg.upload_dir)), name="uploads")
+    try:
+        app.mount("/media/blobs", StaticFiles(directory=str(cfg.workdir / "blobs")),
+                  name="blobs")
+    except Exception:                                             # noqa: BLE001
+        pass
+    app.mount("/media/results", StaticFiles(directory=str(cfg.result_dir)), name="results")
 app.mount("/", StaticFiles(directory=str(cfgmod.WEB_DIR), html=True), name="web")
