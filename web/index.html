@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI Watermark Remover — images &amp; video</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="dot"></span> Watermark<span class="thin">Remover</span></div>
+  <div class="spacer"></div>
+  <div class="backend" id="backend">backend: …</div>
+  <button class="btn primary" id="processAll" disabled>Process all</button>
+</header>
+
+<main>
+  <section class="dropzone" id="dropzone">
+    <div class="dz-inner">
+      <div class="dz-icon">⬆</div>
+      <h2>Drag / Paste / Click to upload</h2>
+      <p>Images and videos. The AI scans every file and marks what it thinks is a watermark.</p>
+      <label class="tabs">
+        <span class="tab active" id="tabAuto">Auto detect</span>
+        <span class="sep">·</span>
+        <span class="muted">then refine with the brush</span>
+      </label>
+      <input type="file" id="fileInput" multiple accept="image/*,video/*" hidden />
+    </div>
+  </section>
+
+  <section class="cards" id="cards"></section>
+
+  <section class="how">
+    <h3>How it works</h3>
+    <ol>
+      <li><b>Detect</b> — for video we use the time axis: a mark that <i>moves</i> (Sora/Veo/Kling) is
+          found from the temporal median, a <i>fixed</i> logo from edge-persistence + variance attenuation.
+          For images we fuse tile-repeat, corner, stroke-text and translucency cues.</li>
+      <li><b>Refine</b> — paint with the brush to add or erase parts of the red mask.</li>
+      <li><b>Remove</b> — moving marks are healed with a motion-compensated temporal clean plate;
+          fixed marks with optical-flow propagation of real pixels from neighbouring frames
+          (LaMa / ProPainter / hosted APIs are pluggable backends).</li>
+    </ol>
+  </section>
+</main>
+
+<!-- ---------------------------- mask editor ---------------------------- -->
+<div class="modal" id="editor" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <b>Mark the watermark</b>
+      <span class="muted" id="editorName"></span>
+      <div class="spacer"></div>
+      <button class="btn" data-close>Close</button>
+      <button class="btn primary" data-apply>Apply mask</button>
+    </div>
+    <div class="toolbar">
+      <button class="tool active" data-tool="brush">🖌 Brush</button>
+      <button class="tool" data-tool="eraser">◻ Eraser</button>
+      <label>Size <input type="range" id="brushSize" min="4" max="160" value="34" /></label>
+      <button class="btn ghost" id="undo">Undo</button>
+      <button class="btn ghost" id="clearUser">Clear my strokes</button>
+      <label class="chk"><input type="checkbox" id="showAuto" checked /> show auto mask</label>
+      <div class="spacer"></div>
+      <label class="mode" id="modeRow" hidden>
+        Watermark
+        <select id="mode">
+          <option value="auto">Auto (detect)</option>
+          <option value="static">Fixed position (logo / timestamp)</option>
+          <option value="moving">Moving (AI-generated mark)</option>
+        </select>
+      </label>
+    </div>
+    <div class="canvas-wrap">
+      <canvas id="canvas"></canvas>
+    </div>
+    <div class="modal-foot muted">
+      Red = will be removed. Brush adds to the mask, eraser punches holes in it (protect that area).
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

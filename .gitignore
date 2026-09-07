@@ -1,0 +1,17 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# runtime data
+runtime/
+*.log
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/
+
+# generated sample media (python tools/make_sample.py se ban jaate hain)
+samples/

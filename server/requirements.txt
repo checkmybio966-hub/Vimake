@@ -1,0 +1,15 @@
+# ---------- minimal (CPU demo, works out of the box) ----------
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+numpy>=1.24
+opencv-contrib-python-headless>=4.8   # contrib = DIS optical flow + optflow
+pillow>=10.0
+imageio-ffmpeg>=0.4.9                 # ships a static ffmpeg binary (no apt needed)
+
+# ---------- optional: GPU / heavy AI backends ----------
+# torch>=2.1                          # LaMa / MAT / ZITS (local GPU or CPU)
+# onnxruntime-gpu>=1.16               # OR run big-lama as ONNX (much lighter)
+# requests>=2.31                      # remote API backends (Replicate / fal / DeWatermark)
+# replicate>=0.25                     # if you prefer the official SDK instead of REST
+# paddleocr>=2.7                      # text detector for image watermark detection
