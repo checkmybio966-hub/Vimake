@@ -24,10 +24,14 @@ dz.addEventListener('drop', e => addFiles([...(e.dataTransfer.files || [])]));
 window.addEventListener('paste', e => addFiles([...(e.clipboardData?.files || [])]));
 
 $('#processAll').addEventListener('click', () => state.items.filter(i => i.info && !i.job).forEach(runJob));
-$('#removeText').addEventListener('change', e => {
-  state.removeText = e.target.checked;
-  state.items.filter(i => i.info && !i.job && !i.mask).forEach(autoDetect);
-});
+const rtBox = document.getElementById('removeText');
+if (rtBox) {
+  state.removeText = rtBox.checked;
+  rtBox.addEventListener('change', e => {
+    state.removeText = e.target.checked;
+    state.items.filter(i => i.info && !i.job && !i.mask).forEach(autoDetect);
+  });
+}
 $$('[data-close]').forEach(b => b.addEventListener('click', () => $('#editor').hidden = true));
 $('[data-apply]').addEventListener('click', applyMask);
 

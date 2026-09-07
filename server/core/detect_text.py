@@ -30,30 +30,39 @@ import numpy as np
 
 
 # --------------------------------------------------------------------------- #
-def _component_stats(binmask: np.ndarray, gray: np.ndarray):
-    """Geometry + stroke-width consistency of one connected component."""
-    area = int(np.count_nonzero(binmask))
-    if area < 8:
+def _component_stats(crop_mask: np.ndarray, crop_gray: np.ndarray,
+                     offset=(0, 0), min_area: int = 8):
+    """Geometry + stroke-width consistency of ONE component, computed on its
+    own small crop (full-image distance transform har region ke liye = bahut
+    slow, isliye crop par karte hain)."""
+    area = int(np.count_nonzero(crop_mask))
+    if area < min_area:
         return None
-    ys, xs = np.nonzero(binmask)
-    x0, x1, y0, y1 = int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1
-    w, h = x1 - x0, y1 - y0
+    h, w = crop_mask.shape[:2]
     if w < 2 or h < 3:
         return None
+    ys, xs = np.nonzero(crop_mask)
+    x0, x1, y0, y1 = int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1
+    bw, bh = x1 - x0, y1 - y0
+    if bw < 2 or bh < 3:
+        return None
 
-    fill = area / float(w * h)
-    aspect = w / float(h)
+    fill = area / float(bw * bh)
+    aspect = bw / float(bh)
 
-    dist = cv2.distanceTransform(binmask, cv2.DIST_L2, 3)
-    vals = dist[binmask > 0]
+    dist = cv2.distanceTransform(crop_mask, cv2.DIST_L2, 3)
+    vals = dist[crop_mask > 0]
     if vals.size < 5:
         return None
-    sw = float(vals.mean())                      # mean stroke half-width
+    sw = float(vals.mean())
     cons = float(np.clip(1.0 - vals.std() / (sw + 1e-6), 0, 1))
 
-    contrast = float(gray[binmask > 0].mean()) - float(gray[~binmask].mean())
-    return {"box": (x0, y0, w, h), "area": area, "fill": fill, "aspect": aspect,
-            "stroke": 2.0 * sw, "consistency": cons, "contrast": contrast}
+    inside = crop_gray[crop_mask > 0]
+    outside = crop_gray[crop_mask == 0]
+    contrast = float(inside.mean()) - float(outside.mean()) if outside.size else 0.0
+    return {"box": (x0 + offset[0], y0 + offset[1], bw, bh), "area": area,
+            "fill": fill, "aspect": aspect, "stroke": 2.0 * sw,
+            "consistency": cons, "contrast": contrast}
 
 
 def _keep(s: dict, h_img: int, w_img: int) -> bool:
@@ -84,21 +93,33 @@ def detect_text_regions(gray: np.ndarray, min_chars: int = 3,
     g = cv2.GaussianBlur(g, (3, 3), 0)
 
     accepted: list[tuple[int, int, int, int]] = []
+    max_regions = 4000
+    seen = 0
     for polarity in (g, 255 - g):
         try:
             mser = cv2.MSER_create(delta=3, min_area=18,
                                    max_area=max(30, int(0.006 * H * W)),
                                    max_variation=0.35, min_diversity=0.2)
-            regions, boxes = mser.detectRegions(polarity)
+            regions, mboxes = mser.detectRegions(polarity)
         except cv2.error:
             continue
         if regions is None:
             continue
-        for region in regions:
-            comp = np.zeros((H, W), np.uint8)
-            pts = region.reshape(-1, 1, 2)
-            cv2.fillPoly(comp, [pts], 255)
-            st = _component_stats(comp, g)
+        for idx, region in enumerate(regions):
+            if seen >= max_regions:
+                break
+            pts = np.asarray(region).reshape(-1, 2)
+            if pts.shape[0] < 5:
+                continue
+            x0, y0 = int(pts[:, 0].min()), int(pts[:, 1].min())
+            x1, y1 = int(pts[:, 0].max()) + 1, int(pts[:, 1].max()) + 1
+            if x1 - x0 < 2 or y1 - y0 < 3 or x1 - x0 > 0.7 * W or y1 - y0 > 0.3 * H:
+                continue
+            seen += 1
+            crop = np.zeros((y1 - y0, x1 - x0), np.uint8)
+            cv2.fillPoly(crop, [(pts - np.array([x0, y0])).reshape(-1, 1, 2)], 255)
+            sub = g[y0:y1, x0:x1]
+            st = _component_stats(crop, sub, offset=(x0, y0))
             if st and _keep(st, H, W):
                 accepted.append(st["box"])
 

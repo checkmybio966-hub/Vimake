@@ -30,7 +30,8 @@ from .detect_video import adaptive_alpha, detect_watermark_video
 from .flow import MotionModel, compute_flow, compose_step, warp_image
 from .inpaint import get_backend
 from .inpaint.opencv_backend import OpenCVBackend
-from .maskops import dilate, ensure_mask, feather, overlay_preview, to_png_bytes, union
+from .maskops import (boxes_from_mask, dilate, ensure_mask, feather, overlay_preview,
+                      to_png_bytes, union)
 from .types import Detection
 
 Progress = Callable[[float, str], None]
@@ -496,7 +497,7 @@ def process_video(src: str, dst: str, mask: Optional[np.ndarray] = None,
                 base = det.mask if (det.found and det.mask is not None and det.mask.any()) \
                     else np.zeros((h, w), np.uint8)
                 det.mask = ensure_mask(cv2.bitwise_or(ensure_mask(base, (h, w)), tmask))
-                det.boxes = _boxes(det.mask)
+                det.boxes = boxes_from_mask(det.mask)
                 det.method = (det.method or "text") + "+text"
                 det.score = max(float(det.score or 0), 0.85)
                 det.notes = (det.notes or "") + f" +{len(boxes)} text region(s)"

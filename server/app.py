@@ -246,6 +246,14 @@ async def remote_process(request: Request):
 
     jobs.update(job.id, result_url=result_url, result_name=result_name)
 
+    # serverless (Vercel) me ffmpeg nahi hota - video ke liye worker zaroori hai
+    if cfg.light and not worker_mod.enabled() and ext in VIDEO_EXT:
+        jobs.update(job.id, status="error",
+                    message="Video needs a worker on serverless: set WM_WORKER_URL "
+                            "to the Docker/Railway/Render service (see DEPLOY.md). "
+                            "Images work without it.")
+        return {"job_id": job.id}
+
     # serverless (Vercel) mode: video / heavy work goes to the long-running worker
     if worker_mod.enabled() and (ext in VIDEO_EXT or cfg.light):
         try:
@@ -318,6 +326,14 @@ def process(asset_id: str = Form(...), mask: str = Form(""), mode: str = Form("a
         result_name = f"{src.stem}_clean{dst.suffix}"
 
     jobs.update(job.id, result_url=result_url, result_name=result_name)
+
+    # serverless (Vercel) me ffmpeg nahi hota - video ke liye worker zaroori hai
+    if cfg.light and not worker_mod.enabled() and ext in VIDEO_EXT:
+        jobs.update(job.id, status="error",
+                    message="Video needs a worker on serverless: set WM_WORKER_URL "
+                            "to the Docker/Railway/Render service (see DEPLOY.md). "
+                            "Images work without it.")
+        return {"job_id": job.id}
 
     # serverless (Vercel) mode: video / heavy work goes to the long-running worker
     if worker_mod.enabled() and (ext in VIDEO_EXT or cfg.light):

@@ -20,10 +20,11 @@
       <div class="dz-icon">⬆</div>
       <h2>Drag / Paste / Click to upload</h2>
       <p>Images and videos. The AI scans every file and marks what it thinks is a watermark.</p>
-      <label class="tabs">
-        <span class="tab active" id="tabAuto">Auto detect</span>
+      <label class="tabs" onclick="event.stopPropagation()">
+        <input type="checkbox" id="removeText" checked />
+        <span class="tab active">Auto detect</span>
         <span class="sep">·</span>
-        <span class="muted">then refine with the brush</span>
+        <span class="muted">also remove all text (captions, timestamps, @handles)</span>
       </label>
       <input type="file" id="fileInput" multiple accept="image/*,video/*" hidden />
     </div>
