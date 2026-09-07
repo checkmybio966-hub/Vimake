@@ -79,11 +79,22 @@ class Config:
     lama_onnx: str = os.environ.get("LAMA_ONNX_PATH", "")
     device: str = os.environ.get("WM_DEVICE", "auto")   # auto | cpu | cuda
 
+    # ---- deployment ---------------------------------------------------
+    # serverless (Vercel): bhaari jobs is worker ko bhej do
+    worker_url: str = os.environ.get("WM_WORKER_URL", "")
+    worker_token: str = os.environ.get("WORKER_TOKEN", "")
+    # light mode = no ffmpeg / no local video pipeline (Vercel par yahi chalega)
+    light: bool = os.environ.get("WM_LIGHT", "0") in ("1", "true", "yes")
+    storage_mode: str = os.environ.get("WM_STORAGE", "local")
+    redis_url: str = os.environ.get("REDIS_URL", "")
+
     def __post_init__(self) -> None:
         self.upload_dir = self.workdir / "uploads"
         self.result_dir = self.workdir / "results"
         for d in (self.upload_dir, self.result_dir):
             d.mkdir(parents=True, exist_ok=True)
+        if self.light:                 # serverless: sirf videos worker par
+            self.max_frames = min(self.max_frames, 1)
 
 
 cfg = Config()

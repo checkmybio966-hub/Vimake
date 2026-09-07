@@ -1,0 +1,21 @@
+# Local / VPS par poora stack ek command me:
+#   docker compose up --build      -> http://localhost:8000
+services:
+  worker:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      WM_WORKDIR: /data
+      WM_MAX_SIDE: "960"
+      WM_MAX_FRAMES: "600"
+      # GPU/quality ke liye (optional):
+      # WM_BACKEND: lama
+      # LAMA_ONNX_PATH: /models/big-lama.onnx
+      # WM_BACKEND: replicate
+      # REPLICATE_API_TOKEN: r8_xxx
+    volumes:
+      - worker-data:/data
+    restart: unless-stopped
+
+volumes:
+  worker-data:

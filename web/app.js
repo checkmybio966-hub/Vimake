@@ -4,7 +4,7 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
-const state = { items: [], editing: null };
+const state = { items: [], editing: null, removeText: true };
 const API = {
   upload: '/api/upload', detect: '/api/detect', process: '/api/process',
   job: id => `/api/jobs/${id}`, backends: '/api/backends',
@@ -24,6 +24,10 @@ dz.addEventListener('drop', e => addFiles([...(e.dataTransfer.files || [])]));
 window.addEventListener('paste', e => addFiles([...(e.clipboardData?.files || [])]));
 
 $('#processAll').addEventListener('click', () => state.items.filter(i => i.info && !i.job).forEach(runJob));
+$('#removeText').addEventListener('change', e => {
+  state.removeText = e.target.checked;
+  state.items.filter(i => i.info && !i.job && !i.mask).forEach(autoDetect);
+});
 $$('[data-close]').forEach(b => b.addEventListener('click', () => $('#editor').hidden = true));
 $('[data-apply]').addEventListener('click', applyMask);
 
@@ -50,7 +54,9 @@ async function addFiles(files) {
 async function autoDetect(item) {
   item.detecting = true; render();
   try {
-    const body = new FormData(); body.append('asset_id', item.info.asset_id);
+    const body = new FormData();
+    body.append('asset_id', item.info.asset_id);
+    body.append('remove_text', state.removeText ? '1' : '0');
     const r = await fetch(API.detect, { method: 'POST', body });
     const d = await r.json();
     item.det = d;
@@ -160,6 +166,7 @@ async function runJob(it) {
   fd.append('asset_id', it.info.asset_id);
   fd.append('mode', it.mode || 'auto');
   if (it.mask) fd.append('mask', it.mask);
+  fd.append('remove_text', (it.mask ? false : state.removeText) ? '1' : '0');
   it.job = 'starting'; it.progress = 0; it.stageText = 'queued'; render();
   try {
     const r = await fetch(API.process, { method: 'POST', body: fd });

@@ -42,6 +42,7 @@ cfg = cfgmod.cfg
 # --------------------------------------------------------------------------- #
 def process_image(src: str, dst: str, mask: Optional[np.ndarray] = None,
                   auto: bool = True, backend_name: Optional[str] = None,
+                  remove_text: bool = False, text_detector=None,
                   progress: Optional[Progress] = None) -> Detection:
     _p(progress, 0.05, "loading")
     frame = cv2.imread(src, cv2.IMREAD_COLOR)
@@ -56,8 +57,9 @@ def process_image(src: str, dst: str, mask: Optional[np.ndarray] = None,
         det = Detection(mask=ensure_mask(mask, frame.shape), score=1.0,
                         method="manual-brush", kind="static")
     elif auto:
-        _p(progress, 0.25, "detecting watermark")
-        det = detect_watermark_image(frame)
+        _p(progress, 0.25, "detecting watermark" + (" + text" if remove_text else ""))
+        det = detect_watermark_image(frame, remove_text=remove_text,
+                                     text_detector=text_detector)
     else:
         raise ValueError("no mask supplied and auto-detection disabled")
 
@@ -460,6 +462,7 @@ def propagate_video(src: str, dst: str, w: int, h: int, fps: float,
 # --------------------------------------------------------------------------- #
 def process_video(src: str, dst: str, mask: Optional[np.ndarray] = None,
                   mode: str = "auto", backend_name: Optional[str] = None,
+                  remove_text: bool = False, text_detector=None,
                   progress: Optional[Progress] = None) -> Detection:
     _p(progress, 0.01, "probing")
     info, w, h, fps = plan_video(src)
@@ -471,7 +474,34 @@ def process_video(src: str, dst: str, mask: Optional[np.ndarray] = None,
     else:
         _p(progress, 0.05, "sampling frames")
         det = detect_video(src, target_shape=(h, w))
-        if not det.found:
+        if not det.found and not remove_text:
+            raise LookupError("WATERMARK_NOT_FOUND")
+
+    # ---- "koi bhi text nahi chahiye": subtitles / captions / timestamps -----
+    # video me text lagbhag hamesha fixed hota hai, isliye use temporal median
+    # frame par detect karna kaafi (aur 100x sasta) hai.
+    if remove_text:
+        from .detect_text import detect_text_regions, text_mask
+
+        _p(progress, 0.08, "detecting text")
+        frames = sample_for_detection(src)
+        if frames:
+            stack = np.stack([cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if f.ndim == 3 else f
+                              for f in frames])
+            med = np.median(stack, axis=0).astype(np.uint8)
+            boxes = text_detector(med) if text_detector else detect_text_regions(med, aggressive=True)
+            tmask = text_mask(med, boxes)
+            if tmask.any():
+                tmask = cv2.resize(tmask, (w, h), interpolation=cv2.INTER_NEAREST)
+                base = det.mask if (det.found and det.mask is not None and det.mask.any()) \
+                    else np.zeros((h, w), np.uint8)
+                det.mask = ensure_mask(cv2.bitwise_or(ensure_mask(base, (h, w)), tmask))
+                det.boxes = _boxes(det.mask)
+                det.method = (det.method or "text") + "+text"
+                det.score = max(float(det.score or 0), 0.85)
+                det.notes = (det.notes or "") + f" +{len(boxes)} text region(s)"
+                det.found_check = True
+        if not (det.mask is not None and det.mask.any()):
             raise LookupError("WATERMARK_NOT_FOUND")
 
     kind = det.kind if mode == "auto" else mode

@@ -75,6 +75,27 @@ def test_image() -> None:
     print(f"[image]  PSNR {before:.2f} dB -> {after:.2f} dB  ({'OK' if after > before else 'FAIL'})")
 
 
+def test_text_image() -> None:
+    """Captions / timestamps / @handles - "image me koi bhi text nahi chahiye"."""
+    src, clean, gt = (SAMPLES / n for n in ("text_wm.png", "text_clean.png", "text_mask.png"))
+    if not src.exists():
+        print("[text]   sample missing - run tools/make_sample.py")
+        return
+    frame = cv2.imread(str(src))
+    det = detect_watermark_image(frame, remove_text=True)
+    g = cv2.imread(str(gt), 0)
+    print(f"[text]   detect={det.found} score={det.score:.2f} method={det.method} "
+          f"mask-IoU={iou(det.mask if det.found else np.zeros_like(g), g):.3f} {det.notes}")
+    if not det.found:
+        print("[text]   FAIL: nothing detected")
+        return
+    out = str(TMP / "text_out.png")
+    pipeline.process_image(str(src), out, mask=det.mask)
+    before = psnr(cv2.imread(str(src)), cv2.imread(str(clean)))
+    after = psnr(cv2.imread(out), cv2.imread(str(clean)))
+    print(f"[text]   PSNR {before:.2f} dB -> {after:.2f} dB ({'OK' if after > before else 'FAIL'})")
+
+
 def test_video(name: str, expect_kind: str) -> None:
     src = SAMPLES / f"{name}_wm.mp4"
     clean_p = SAMPLES / f"{name}_clean.mp4"
@@ -102,5 +123,6 @@ if __name__ == "__main__":
     if not (SAMPLES / "photo_wm.png").exists():
         print("run tools/make_sample.py first"); sys.exit(1)
     test_image()
+    test_text_image()
     test_video("video_static", "static")
     test_video("video_moving", "moving")

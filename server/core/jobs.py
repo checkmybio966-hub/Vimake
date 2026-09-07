@@ -11,10 +11,84 @@ import time
 import uuid
 from typing import Callable, Dict, Optional
 
+from . import config as cfgmod
 from .types import JobState
 
 _LOCK = threading.Lock()
 _JOBS: Dict[str, JobState] = {}
+
+# ---------------- pluggable store (memory | redis) ----------------------
+class _MemoryStore:
+    name = "memory"
+
+    def set(self, jid: str, st: JobState) -> None:
+        _JOBS[jid] = st
+
+    def get(self, jid: str):
+        return _JOBS.get(jid)
+
+    def update(self, jid: str, **kw) -> None:
+        st = _JOBS.get(jid)
+        if st:
+            for k, v in kw.items():
+                setattr(st, k, v)
+
+
+class _RedisStore:
+    """Serverless (Vercel) ke liye: state Redis/Upstash me, kyunki function
+    stateless hota hai aur har request alag instance par ja sakti hai."""
+
+    name = "redis"
+
+    def __init__(self, url: str, ttl: int = 86400):
+        import json
+
+        import redis  # type: ignore
+
+        self._json = json
+        self.ttl = ttl
+        self.r = redis.from_url(url)
+
+    def _key(self, jid: str) -> str:
+        return f"wm:job:{jid}"
+
+    def set(self, jid: str, st: JobState) -> None:
+        self.r.setex(self._key(jid), self.ttl, self._json.dumps(st.__dict__))
+
+    def get(self, jid: str):
+        raw = self.r.get(self._key(jid))
+        if not raw:
+            return None
+        st = JobState(id=jid)
+        st.__dict__.update(self._json.loads(raw))
+        return st
+
+    def update(self, jid: str, **kw) -> None:
+        st = self.get(jid) or JobState(id=jid)
+        for k, v in kw.items():
+            setattr(st, k, v)
+        self.set(jid, st)
+
+
+_STORE = None
+
+
+def _store():
+    global _STORE
+    if _STORE is None:
+        url = cfgmod.cfg.redis_url if hasattr(cfgmod, "cfg") else ""
+        if not url:
+            import os
+            url = os.environ.get("REDIS_URL", "")
+        if url:
+            try:
+                _STORE = _RedisStore(url)
+            except Exception as exc:                      # noqa: BLE001
+                print(f"[jobs] redis unavailable ({exc}) -> memory")
+                _STORE = _MemoryStore()
+        else:
+            _STORE = _MemoryStore()
+    return _STORE
 
 
 def create() -> JobState:
@@ -22,10 +96,19 @@ def create() -> JobState:
     st = JobState(id=jid)
     with _LOCK:
         _JOBS[jid] = st
+    if _store().name != "memory":
+        _store().set(jid, st)
     return st
 
 
 def get(jid: str) -> Optional[JobState]:
+    if _store().name != "memory":
+        try:
+            st = _store().get(jid)
+            if st:
+                return st
+        except Exception:                                  # noqa: BLE001
+            pass
     with _LOCK:
         return _JOBS.get(jid)
 
@@ -36,6 +119,16 @@ def update(jid: str, **kw) -> None:
         if st:
             for k, v in kw.items():
                 setattr(st, k, v)
+        else:
+            st = JobState(id=jid)
+            _JOBS[jid] = st
+            for k, v in kw.items():
+                setattr(st, k, v)
+    if _store().name != "memory":
+        try:
+            _store().update(jid, **kw)
+        except Exception:                                  # noqa: BLE001
+            pass
 
 
 def run(jid: str, fn: Callable[[Callable[[float, str], None]], None]) -> None:

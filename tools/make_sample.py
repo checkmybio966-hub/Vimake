@@ -97,6 +97,34 @@ def build_video(name: str, moving: bool) -> None:
     print(f"  {wm_path.name:26s} {cl_path.name:26s} gt coverage={gt.mean():.4f}")
 
 
+def draw_text_block(base: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Caption + timestamp + @handle - the 'koi bhi text nahi chahiye' case."""
+    lay = base.copy()
+    # meme-style caption (bottom centre, white with dark outline)
+    cv2.putText(lay, "MORNING VIBES", (90, H - 46), cv2.FONT_HERSHEY_DUPLEX,
+                1.15, (0, 0, 0), 6, cv2.LINE_AA)
+    cv2.putText(lay, "MORNING VIBES", (90, H - 46), cv2.FONT_HERSHEY_DUPLEX,
+                1.15, (255, 255, 255), 2, cv2.LINE_AA)
+    # timestamp (top left)
+    cv2.putText(lay, "2026-09-07 10:42", (20, 36), cv2.FONT_HERSHEY_SIMPLEX,
+                0.62, (250, 250, 250), 2, cv2.LINE_AA)
+    # handle (bottom right)
+    cv2.putText(lay, "@travel.diaries", (W - 232, H - 18), cv2.FONT_HERSHEY_SIMPLEX,
+                0.58, (255, 255, 255), 2, cv2.LINE_AA)
+    mask = (cv2.absdiff(lay, base).max(axis=2) > 8).astype(np.uint8) * 255
+    out = cv2.addWeighted(lay, 0.88, base, 0.12, 0)
+    return out, mask
+
+
+def build_text_image() -> None:
+    base = background(2.0)
+    wm, mask = draw_text_block(base)
+    cv2.imwrite(str(OUT / "text_wm.png"), wm)
+    cv2.imwrite(str(OUT / "text_clean.png"), base)
+    cv2.imwrite(str(OUT / "text_mask.png"), mask)
+    print(f"  text_wm.png                  text_clean.png             gt coverage={mask.mean():.4f}")
+
+
 def build_image() -> None:
     base = background(1.0)
     lay = base.copy()
@@ -118,6 +146,7 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     print("building samples in", OUT)
     build_image()
+    build_text_image()
     build_video("video_static", moving=False)
     build_video("video_moving", moving=True)
     print("done")

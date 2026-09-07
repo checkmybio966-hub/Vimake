@@ -308,9 +308,29 @@ def expand_repeat(strokes_or_ink: np.ndarray, template: np.ndarray,
 #  main entry point
 # --------------------------------------------------------------------------- #
 def detect_watermark_image(bgr: np.ndarray, min_ratio: float = 0.0004,
-                           max_ratio: float = 0.12) -> Detection:
+                           max_ratio: float = 0.12, remove_text: bool = False,
+                           text_detector=None) -> Detection:
     bgr_s, gray, scale = _prep(bgr)
     blobs = _candidate_blobs(gray)
+
+    # ---- optional: "image me koi bhi text nahi chahiye" --------------------
+    text_m = np.zeros(gray.shape, np.uint8)
+    text_boxes: list[tuple[int, int, int, int]] = []
+    if remove_text:
+        from .detect_text import detect_text_regions, text_mask
+
+        # MSER un-blurred gray par behtar kaam karta hai (blur se stroke
+        # stability kharaab hoti hai -> recall gir jaata hai)
+        raw_gray = cv2.cvtColor(bgr_s, cv2.COLOR_BGR2GRAY)
+        text_boxes = (text_detector(raw_gray) if text_detector
+                      else detect_text_regions(raw_gray, aggressive=True))
+        text_m = text_mask(raw_gray, text_boxes, pad=3)
+        if text_m.any() and not blobs:
+            mask = _rescale_back(dilate(cleanup(text_m, min_area=12), 2), bgr.shape)
+            return Detection(mask=mask, boxes=_boxes(mask), score=0.85,
+                             method="text-removal", kind="static",
+                             notes=f"{len(text_boxes)} text region(s)")
+
     if not blobs:
         return Detection(mask=np.zeros(bgr.shape[:2], np.uint8), score=0.0,
                          method="none", notes="no candidate region found")
@@ -338,10 +358,15 @@ def detect_watermark_image(bgr: np.ndarray, min_ratio: float = 0.0004,
         hits += len(grp)
     if rep_mask is not None:
         score = 0.90 * float(np.clip(hits / 3.0, 0.72, 1.0))
+        if text_m.any():
+            rep_mask = (cv2.bitwise_or(rep_mask, text_m) if score >= 0.80 else text_m)
+            score = max(score, 0.85)
         mask = _rescale_back(dilate(cleanup(rep_mask, min_area=16), 1), bgr.shape)
         return Detection(mask=mask, boxes=_boxes(mask), score=round(score, 3),
-                         method="repeat-shape", kind="static",
-                         notes=f"{len(clusters)} repeated shape cluster(s), {hits} instances")
+                         method="repeat-shape" + ("+text" if text_m.any() else ""),
+                         kind="static",
+                         notes=f"{len(clusters)} repeated shape cluster(s), {hits} instances"
+                               + (f", +{len(text_boxes)} text region(s)" if text_m.any() else ""))
 
     # ---- path 2: stroke + priors -------------------------------------------
     best: Optional[tuple[float, tuple, np.ndarray]] = None
@@ -364,9 +389,23 @@ def detect_watermark_image(bgr: np.ndarray, min_ratio: float = 0.0004,
                          method="none", notes="all candidates rejected by size prior")
 
     score, box, tight = best
+    notes_extra = f" +{len(text_boxes)} text region(s)" if text_m.any() else ""
+    # Text detector chal raha hai to kamzor watermark candidate (aksar scene
+    # ka koi blob) mat milao - "koi bhi text nahi chahiye" mode me precision
+    # recall se zyada keemti hai.
+    if text_m.any():
+        if score >= 0.80:                       # strong watermark candidate bhi milao
+            tight = cv2.bitwise_or(tight, text_m)
+            score = max(float(score), 0.85)
+        else:                                   # kamzor candidate = scene blob -> sirf text
+            tight, score = text_m, 0.85
+            notes_extra = ("; TEXT ONLY - watermark candidate weak, "
+                           f"{len(text_boxes)} text region(s) removed")
     mask = _rescale_back(dilate(cleanup(tight, min_area=20), 2), bgr.shape)
     return Detection(mask=mask, boxes=_boxes(mask), score=round(float(np.clip(score, 0, 1)), 3),
-                     method="stroke+prior", kind="static", notes=f"box={box}")
+                     method="stroke+prior" + ("+text" if text_m.any() else ""),
+                     kind="static",
+                     notes=f"watermark box={box}{notes_extra}")
 
 
 def _rescale_back(mask: np.ndarray, shape) -> np.ndarray:

@@ -1,0 +1,12 @@
+# Vercel (serverless) ke liye halka dependency set.
+# Isme ffmpeg nahi hai - isliye VIDEOS ek alag worker par jaate hain
+# (WM_WORKER_URL), images yahin process ho jaati hain (OpenCV inpaint, ~1-3 s).
+fastapi==0.115.*
+python-multipart==0.0.*
+numpy==1.26.*
+opencv-python-headless==4.10.*     # detection + mask + inpaint (no GUI deps)
+pillow==10.*
+
+# optional: remote storage (S3 / Cloudflare R2) aur job state (Upstash Redis)
+boto3==1.35.*
+redis==5.0.*
